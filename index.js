@@ -1,25 +1,25 @@
 require('dotenv').config();
-const cors = require('cors'); // Agrega esta línea
+const cors = require('cors'); 
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const app = express();
 
 // 1. CONFIGURACIÓN DE BASE DE DATOS
-// 1. CONFIGURACIÓN DE BASE DE DATOS
+// Usamos el bloque ssl necesario para conectar con Neon desde Render
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
- 
   ssl: {
-    rejectUnauthorized: false // Permite conexiones seguras en Render/Neon
+    rejectUnauthorized: false 
   }
 });
+
 // 2. MIDDLEWARES
-app.use(cors());
+app.use(cors()); // Permite que tu frontend en GitHub Pages haga peticiones al backend
 app.use(express.json());
 
 // --- RUTAS DE USUARIOS ---
@@ -83,7 +83,6 @@ app.get('/discos', async (req, res) => {
 app.post('/discos', async (req, res) => {
   const { titulo, artista, precio, stock, imagen_url, nombre_usuario } = req.body;
   try {
-    // Validación de seguridad: ¿Es realmente un admin?
     const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
     
     if (!adminCheck.rows[0] || !adminCheck.rows[0].es_admin) {
@@ -99,25 +98,18 @@ app.post('/discos', async (req, res) => {
   }
 });
 
-// ACTUALIZAR (Para el stock al comprar)
+// ACTUALIZAR
 app.put('/discos/:id', async (req, res) => {
   const { id } = req.params;
-  // Recibimos TODOS los campos del formulario
   const { titulo, artista, precio, stock, imagen_url, nombre_usuario } = req.body;
 
-  console.log(`\n--- 📝 Intento de actualización para ID: ${id} ---`);
-  console.log("Datos recibidos:", req.body);
-
   try {
-    // 1. Verificación de Admin
     const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
     
     if (!adminCheck.rows[0]?.es_admin) {
-      console.log("❌ Rechazado: El usuario no es administrador.");
       return res.status(403).json({ error: "No tienes permiso de administrador." });
     }
 
-    // 2. Query completa (Actualizamos todos los campos)
     const query = `
       UPDATE discos 
       SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5 
@@ -128,11 +120,9 @@ app.put('/discos/:id', async (req, res) => {
     const resultado = await pool.query(query, valores);
 
     if (resultado.rows.length === 0) {
-      console.log("❌ Error: No se encontró el disco con ese ID.");
       return res.status(404).json({ error: "Disco no encontrado" });
     }
 
-    console.log("✅ ¡Actualización exitosa en la DB!");
     res.json(resultado.rows[0]);
 
   } catch (error) {
@@ -159,12 +149,12 @@ app.delete('/discos/:id', async (req, res) => {
     res.status(500).json({ error: "Error al eliminar el disco" });
   }
 });
-// RUTA ESPECIAL PARA COMPRAS (No requiere ser admin)
+
+// RUTA ESPECIAL PARA COMPRAS
 app.post('/discos/:id/compra', async (req, res) => {
   const { id } = req.params;
   
   try {
-    // 1. Verificamos si hay stock disponible primero
     const disco = await pool.query('SELECT stock FROM discos WHERE id = $1', [id]);
     
     if (disco.rows.length === 0) return res.status(404).json({ error: "Disco no encontrado" });
@@ -175,7 +165,6 @@ app.post('/discos/:id/compra', async (req, res) => {
       return res.status(400).json({ error: "No hay stock disponible" });
     }
 
-    // 2. Restamos 1 al stock
     const nuevoStock = stockActual - 1;
     await pool.query('UPDATE discos SET stock = $2 WHERE id = $1', [id, nuevoStock]);
 
@@ -188,17 +177,18 @@ app.post('/discos/:id/compra', async (req, res) => {
 });
 
 // INICIO DEL SERVIDOR
+// Usamos el puerto asignado por Render o el 3000 por defecto
 const PORT = process.env.PORT || 3000; 
 
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
   
   // Prueba de salud de la base de datos
   pool.query('SELECT NOW()', (err) => {
     if (err) {
-      console.log(" ERROR DE CONEXIÓN A DB:", err.message);
+      console.log("❌ ERROR DE CONEXIÓN A DB:", err.message);
     } else {
-      console.log("Conexión a PostgreSQL exitosa.");
+      console.log("✅ Conexión a PostgreSQL exitosa.");
     }
   });
 });
