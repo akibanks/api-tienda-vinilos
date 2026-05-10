@@ -1,8 +1,36 @@
+// ══════════════════════════════════════════════════════════
+//  VinylVibes — index.js  (backend v2)
+//
+//  Cambios respecto a v1:
+//    · JWT reemplaza el chequeo de admin por nombre en el body.
+//    · soloAdmin usa el payload del token, no una query a la BD.
+//    · /checkout crea venta + linea_venta en una sola transacción
+//      atómica con SELECT … FOR UPDATE (sin condiciones de carrera).
+//    · /discos/:id/compra también registra venta/linea_venta y usa JWT.
+//    · Stock se descuenta vía triggers de la BD (trg_restar_stock).
+//    · CORS configurable por variable de entorno CORS_ORIGIN.
+//    · Validación de inputs más estricta en todos los endpoints.
+//
+//  Variables de entorno requeridas (.env):
+//    DB_USER, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT
+//    JWT_SECRET        — clave secreta para firmar tokens (¡cambiar en producción!)
+//    CORS_ORIGIN       — lista separada por comas de orígenes permitidos
+//                        (ej: https://tuusuario.github.io,https://vinylvibes.com)
+//                        Si está vacía, acepta cualquier origen (útil en desarrollo).
+//    PORT              — puerto del servidor (default 3000)
+//
+//  Dependencias nuevas: npm install jsonwebtoken
+// ══════════════════════════════════════════════════════════
+
 require('dotenv').config();
 const cors    = require('cors');
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt  = require('bcrypt');
+const jwt     = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_cambiar_en_produccion';
+const JWT_EXPIRY = '7d';
 
 const app  = express();
 const pool = new Pool({
@@ -11,53 +39,85 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port:     process.env.DB_PORT,
-  ssl:      { rejectUnauthorized: false }
+  ssl:      { rejectUnauthorized: false },
 });
 
+
 // ── MIDDLEWARES ───────────────────────────────────────────
-app.use(cors());
+
+// CORS: restringe orígenes mediante CORS_ORIGIN; sin configurar acepta todo
+// (conveniente para desarrollo local y Render previews).
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // Peticiones sin origen (curl, Postman, mismo origen) siempre pasan.
+    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Origen no permitido por CORS: ${origin}`));
+    }
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
 
 
-// ══════════════════════════════════════════════════════════
-//  HELPERS
-// ══════════════════════════════════════════════════════════
+// ── MIDDLEWARES DE AUTH ───────────────────────────────────
 
 /**
- * Verifica que el nombre_usuario enviado en el body pertenezca
- * a un usuario con rol 'admin'. Devuelve true/false.
+ * Extrae y verifica el JWT del header Authorization: Bearer <token>.
+ * Si el token es válido, adjunta req.usuario = { id, nombre, rol }.
  */
-async function esAdmin(nombre_usuario) {
-  if (!nombre_usuario) return false;
-  const r = await pool.query(
-    "SELECT rol FROM usuario WHERE nombre = $1",
-    [nombre_usuario]
-  );
-  return r.rows[0]?.rol === 'admin';
+function verificarToken(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer '))
+    return res.status(401).json({ error: 'Token de autenticación requerido.' });
+  try {
+    req.usuario = jwt.verify(auth.slice(7), JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Token inválido o expirado. Vuelve a iniciar sesión.' });
+  }
 }
 
 /**
- * Dado un nombre de artista (string), devuelve su id_artista.
- * Si no existe lo crea. Usado en POST y PUT de discos.
+ * Requiere que el usuario autenticado tenga rol 'admin'.
+ * Usar siempre DESPUÉS de verificarToken.
+ */
+function soloAdmin(req, res, next) {
+  if (req.usuario?.rol !== 'admin')
+    return res.status(403).json({ error: 'Acceso denegado: se requieren permisos de administrador.' });
+  next();
+}
+
+
+// ── HELPERS ───────────────────────────────────────────────
+
+/**
+ * Dado un nombre de artista, devuelve su id_artista existente o
+ * lo crea en la misma transacción del cliente recibido.
  */
 async function obtenerOCrearArtista(client, nombre) {
-  const nombre_limpio = nombre.trim();
+  const limpio = nombre.trim();
   const existe = await client.query(
     'SELECT id_artista FROM artista WHERE nombre = $1',
-    [nombre_limpio]
+    [limpio]
   );
   if (existe.rows.length > 0) return existe.rows[0].id_artista;
-
   const nuevo = await client.query(
     'INSERT INTO artista (nombre) VALUES ($1) RETURNING id_artista',
-    [nombre_limpio]
+    [limpio]
   );
   return nuevo.rows[0].id_artista;
 }
 
 /**
- * Formatea una fila de producto para que el frontend reciba
- * los mismos nombres de campo que antes (imagen_url, video_url, etc.)
+ * Normaliza una fila de producto al shape que espera el frontend.
  */
 function formatearDisco(row) {
   return {
@@ -73,10 +133,7 @@ function formatearDisco(row) {
   };
 }
 
-/**
- * Query reutilizable que trae todos los campos necesarios de un disco,
- * incluyendo el artista (agregado) y el video principal.
- */
+/** Query base reutilizable: producto + artista agregado + video principal. */
 const SQL_DISCOS = `
   SELECT
     p.id_producto,
@@ -87,7 +144,7 @@ const SQL_DISCOS = `
     p.url_img,
     p.genero,
     STRING_AGG(DISTINCT a.nombre, ', ' ORDER BY a.nombre) AS artista,
-    pv.youtube_id                                          AS video_url
+    pv.youtube_id AS video_url
   FROM producto p
   LEFT JOIN producto_artista pa ON p.id_producto = pa.id_producto
   LEFT JOIN artista           a  ON pa.id_artista = a.id_artista
@@ -97,27 +154,31 @@ const SQL_DISCOS = `
 
 
 // ══════════════════════════════════════════════════════════
-//  AUTH — /registro   (BUG 5 FIX: endpoint faltante — login.js lo llamaba pero no existía)
+//  AUTH — /registro
 // ══════════════════════════════════════════════════════════
 
 app.post('/registro', async (req, res) => {
   const { nombre_usuario, password } = req.body;
-  if (!nombre_usuario || !password)
+
+  if (!nombre_usuario?.trim() || !password)
     return res.status(400).json({ error: 'Nombre de usuario y contraseña son requeridos.' });
   if (password.length < 6)
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
 
   try {
-    const existe = await pool.query('SELECT id_usuario FROM usuario WHERE nombre = $1', [nombre_usuario]);
+    const existe = await pool.query(
+      'SELECT id_usuario FROM usuario WHERE nombre = $1',
+      [nombre_usuario.trim()]
+    );
     if (existe.rows.length > 0)
       return res.status(409).json({ error: 'El nombre de usuario ya está en uso.' });
 
-    const hash = await bcrypt.hash(password, 10);
-    // correo se genera como placeholder único; si quieres requerirlo, pásalo desde el frontend
-    const correoPlaceholder = `${nombre_usuario}@vinylvibes.local`;
+    const hash             = await bcrypt.hash(password, 10);
+    const correoPlaceholder = `${nombre_usuario.trim()}@vinylvibes.local`;
+
     await pool.query(
       `INSERT INTO usuario (nombre, correo, contrasena, rol) VALUES ($1, $2, $3, 'cliente')`,
-      [nombre_usuario, correoPlaceholder, hash]
+      [nombre_usuario.trim(), correoPlaceholder, hash]
     );
     res.status(201).json({ mensaje: 'Usuario creado exitosamente.' });
   } catch (err) {
@@ -133,27 +194,38 @@ app.post('/registro', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   const { nombre_usuario, password } = req.body;
+
+  if (!nombre_usuario?.trim() || !password)
+    return res.status(400).json({ error: 'Nombre y contraseña son requeridos.' });
+
   try {
     const r = await pool.query(
       'SELECT * FROM usuario WHERE nombre = $1',
-      [nombre_usuario]
+      [nombre_usuario.trim()]
     );
     if (r.rows.length === 0)
-      return res.status(401).json({ error: 'Usuario no encontrado' });
+      return res.status(401).json({ error: 'Usuario no encontrado.' });
 
     const usuario    = r.rows[0];
     const esCorrecta = await bcrypt.compare(password, usuario.contrasena);
-
     if (!esCorrecta)
-      return res.status(401).json({ error: 'Contraseña incorrecta' });
+      return res.status(401).json({ error: 'Contraseña incorrecta.' });
+
+    // Emitir JWT con id, nombre y rol — nunca incluir la contraseña
+    const token = jwt.sign(
+      { id: usuario.id_usuario, nombre: usuario.nombre, rol: usuario.rol },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
 
     res.json({
+      token,
       nombre:   usuario.nombre,
-      es_admin: usuario.rol === 'admin',   // mantiene compatibilidad con el frontend
+      es_admin: usuario.rol === 'admin',
     });
   } catch (err) {
     console.error('LOGIN:', err.message);
-    res.status(500).json({ error: 'Error en el servidor' });
+    res.status(500).json({ error: 'Error en el servidor.' });
   }
 });
 
@@ -162,7 +234,7 @@ app.post('/login', async (req, res) => {
 //  DISCOS — CRUD
 // ══════════════════════════════════════════════════════════
 
-// GET /discos — devuelve todos los productos con artista y video
+// GET /discos — catálogo completo
 app.get('/discos', async (req, res) => {
   try {
     const r = await pool.query(
@@ -171,51 +243,57 @@ app.get('/discos', async (req, res) => {
     res.json(r.rows.map(formatearDisco));
   } catch (err) {
     console.error('GET /discos:', err.message);
-    res.status(500).json({ error: 'No se pudieron cargar los discos' });
+    res.status(500).json({ error: 'No se pudieron cargar los discos.' });
   }
 });
 
-// GET /discos/:id — devuelve un disco por id
+// GET /discos/:id — un disco por id
 app.get('/discos/:id', async (req, res) => {
   const { id } = req.params;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
+
   try {
     const r = await pool.query(
-      SQL_DISCOS +
-      ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
+      SQL_DISCOS + ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
       [id]
     );
     if (r.rows.length === 0)
-      return res.status(404).json({ error: 'Disco no encontrado' });
-
+      return res.status(404).json({ error: 'Disco no encontrado.' });
     res.json(formatearDisco(r.rows[0]));
   } catch (err) {
     console.error('GET /discos/:id:', err.message);
-    res.status(500).json({ error: 'Error al obtener el disco' });
+    res.status(500).json({ error: 'Error al obtener el disco.' });
   }
 });
 
-// POST /discos — crea un nuevo disco (solo admin)
-app.post('/discos', async (req, res) => {
-  const { titulo, artista, precio, anio, stock, imagen_url, video_url, genero, nombre_usuario } = req.body;
+// POST /discos — crear disco (solo admin)
+app.post('/discos', verificarToken, soloAdmin, async (req, res) => {
+  const { titulo, artista, precio, anio, stock, imagen_url, video_url, genero } = req.body;
 
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'Acceso denegado: no tienes permisos de administrador.' });
+  if (!titulo?.trim())
+    return res.status(400).json({ error: 'El título es obligatorio.' });
+  if (typeof precio !== 'number' || precio < 0)
+    return res.status(400).json({ error: 'El precio debe ser un número positivo.' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1. Insertar producto
     const rProd = await client.query(
       `INSERT INTO producto (titulo, precio, anio, stock, url_img, genero)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id_producto`,
-      [titulo, precio, anio ?? new Date().getFullYear(), stock ?? 0, imagen_url ?? null, genero ?? null]
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_producto`,
+      [
+        titulo.trim(),
+        precio,
+        anio ?? new Date().getFullYear(),
+        stock ?? 0,
+        imagen_url?.trim() || null,
+        genero?.trim()     || null,
+      ]
     );
     const id_producto = rProd.rows[0].id_producto;
 
-    // 2. Artista → buscar o crear + vincular
-    if (artista) {
+    if (artista?.trim()) {
       const id_artista = await obtenerOCrearArtista(client, artista);
       await client.query(
         'INSERT INTO producto_artista (id_producto, id_artista) VALUES ($1, $2) ON CONFLICT DO NOTHING',
@@ -223,67 +301,55 @@ app.post('/discos', async (req, res) => {
       );
     }
 
-    // 3. Video principal (opcional)
-    if (video_url) {
+    if (video_url?.trim()) {
       await client.query(
-        `INSERT INTO producto_video (id_producto, youtube_id, tipo)
-         VALUES ($1, $2, 'principal')`,
-        [id_producto, video_url]
+        `INSERT INTO producto_video (id_producto, youtube_id, tipo) VALUES ($1, $2, 'principal')`,
+        [id_producto, video_url.trim()]
       );
     }
 
     await client.query('COMMIT');
 
-    // 4. Devolver el disco completo
     const rFinal = await pool.query(
-      SQL_DISCOS +
-      ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
+      SQL_DISCOS + ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
       [id_producto]
     );
     res.status(201).json(formatearDisco(rFinal.rows[0]));
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /discos:', err.message);
-    res.status(500).json({ error: 'Error al guardar en la base de datos' });
+    res.status(500).json({ error: 'Error al guardar en la base de datos.' });
   } finally {
     client.release();
   }
 });
 
-// PUT /discos/:id — actualiza un disco (solo admin)
-app.put('/discos/:id', async (req, res) => {
+// PUT /discos/:id — editar disco (solo admin)
+app.put('/discos/:id', verificarToken, soloAdmin, async (req, res) => {
   const { id } = req.params;
-  const { titulo, artista, precio, anio, stock, imagen_url, video_url, genero, nombre_usuario } = req.body;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
 
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'No tienes permiso.' });
+  const { titulo, artista, precio, anio, stock, imagen_url, video_url, genero } = req.body;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1. Actualizar producto
     const rProd = await client.query(
       `UPDATE producto
-       SET titulo   = $1,
-           precio   = $2,
-           anio     = $3,
-           stock    = $4,
-           url_img  = $5,
-           genero   = $6
+       SET titulo  = $1, precio = $2, anio = $3, stock = $4, url_img = $5, genero = $6
        WHERE id_producto = $7
        RETURNING id_producto`,
-      [titulo, precio, anio, stock, imagen_url ?? null, genero ?? null, id]
+      [titulo, precio, anio, stock, imagen_url?.trim() || null, genero?.trim() || null, id]
     );
     if (rProd.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Disco no encontrado' });
+      return res.status(404).json({ error: 'Disco no encontrado.' });
     }
 
-    // 2. Actualizar artista: eliminar vínculos anteriores y volver a vincular
     if (artista !== undefined) {
       await client.query('DELETE FROM producto_artista WHERE id_producto = $1', [id]);
-      if (artista) {
+      if (artista?.trim()) {
         const id_artista = await obtenerOCrearArtista(client, artista);
         await client.query(
           'INSERT INTO producto_artista (id_producto, id_artista) VALUES ($1, $2) ON CONFLICT DO NOTHING',
@@ -292,17 +358,14 @@ app.put('/discos/:id', async (req, res) => {
       }
     }
 
-    // 3. Actualizar video principal: upsert
     if (video_url !== undefined) {
-      if (video_url) {
+      if (video_url?.trim()) {
         await client.query(
-          `INSERT INTO producto_video (id_producto, youtube_id, tipo)
-           VALUES ($1, $2, 'principal')
+          `INSERT INTO producto_video (id_producto, youtube_id, tipo) VALUES ($1, $2, 'principal')
            ON CONFLICT (id_producto, tipo) DO UPDATE SET youtube_id = EXCLUDED.youtube_id`,
-          [id, video_url]
+          [id, video_url.trim()]
         );
       } else {
-        // Si se manda video_url vacío, se borra el video principal
         await client.query(
           "DELETE FROM producto_video WHERE id_producto = $1 AND tipo = 'principal'",
           [id]
@@ -313,27 +376,23 @@ app.put('/discos/:id', async (req, res) => {
     await client.query('COMMIT');
 
     const rFinal = await pool.query(
-      SQL_DISCOS +
-      ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
+      SQL_DISCOS + ' WHERE p.id_producto = $1 GROUP BY p.id_producto, pv.youtube_id',
       [id]
     );
     res.json(formatearDisco(rFinal.rows[0]));
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('PUT /discos/:id:', err.message);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    res.status(500).json({ error: 'Error interno del servidor.' });
   } finally {
     client.release();
   }
 });
 
-// DELETE /discos/:id — borra un disco (solo admin, cascada automática)
-app.delete('/discos/:id', async (req, res) => {
+// DELETE /discos/:id — borrar disco (solo admin, cascada automática en BD)
+app.delete('/discos/:id', verificarToken, soloAdmin, async (req, res) => {
   const { id } = req.params;
-  const { nombre_usuario } = req.body;
-
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'No tienes permiso para borrar discos.' });
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
 
   try {
     const r = await pool.query(
@@ -341,58 +400,176 @@ app.delete('/discos/:id', async (req, res) => {
       [id]
     );
     if (r.rows.length === 0)
-      return res.status(404).json({ error: 'Disco no encontrado' });
-
-    res.json({ mensaje: 'Disco eliminado correctamente' });
+      return res.status(404).json({ error: 'Disco no encontrado.' });
+    res.json({ mensaje: 'Disco eliminado correctamente.' });
   } catch (err) {
     console.error('DELETE /discos/:id:', err.message);
-    res.status(500).json({ error: 'Error al eliminar el disco' });
+    res.status(500).json({ error: 'Error al eliminar el disco.' });
   }
 });
 
 
 // ══════════════════════════════════════════════════════════
-//  COMPRA — /discos/:id/compra
+//  CHECKOUT — /checkout
+//
+//  Reemplaza el loop de peticiones individuales a /compra.
+//  Recibe todos los ítems del carrito en una sola petición,
+//  verifica stock con FOR UPDATE (evita condiciones de carrera),
+//  crea la venta y sus líneas en una transacción atómica.
+//  El trigger trg_restar_stock descuenta el stock automáticamente
+//  al insertar cada linea_venta.
+//
+//  Body: { items: [{ id_producto: number, cantidad: number }] }
 // ══════════════════════════════════════════════════════════
-// Descuenta stock directamente en `producto`.
-// NOTA: si los triggers de linea_venta están activos en la BD,
-// no uses ambos mecanismos a la vez para evitar doble descuento.
 
-app.post('/discos/:id/compra', async (req, res) => {
-  const { id } = req.params;
+app.post('/checkout', verificarToken, async (req, res) => {
+  const { items } = req.body;
+  const id_cliente = req.usuario.id;
+
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: 'El carrito está vacío.' });
+
+  // Validar estructura básica de cada ítem
+  for (const item of items) {
+    if (!Number.isInteger(item.id_producto) || !Number.isInteger(item.cantidad) || item.cantidad < 1)
+      return res.status(400).json({ error: 'Formato de artículos inválido.' });
+  }
+
+  const client = await pool.connect();
   try {
-    // Verifica stock y descuenta en una sola operación atómica
-    const r = await pool.query(
-      `UPDATE producto
-       SET stock = stock - 1
-       WHERE id_producto = $1 AND stock > 0
-       RETURNING stock AS nuevo_stock`,
-      [id]
+    await client.query('BEGIN');
+
+    // Bloquear filas de producto para evitar overselling concurrente
+    const ids     = items.map(i => i.id_producto);
+    const rStock  = await client.query(
+      'SELECT id_producto, titulo, stock, precio FROM producto WHERE id_producto = ANY($1) FOR UPDATE',
+      [ids]
     );
 
-    if (r.rows.length === 0) {
-      // Distingue entre "no existe" y "sin stock"
-      const existe = await pool.query(
-        'SELECT id_producto FROM producto WHERE id_producto = $1', [id]
-      );
-      if (existe.rows.length === 0)
-        return res.status(404).json({ error: 'Disco no encontrado' });
-      return res.status(400).json({ error: 'No hay stock disponible' });
+    const productoMap = Object.fromEntries(
+      rStock.rows.map(r => [r.id_producto, r])
+    );
+
+    // Verificar que todos los productos existen y tienen stock suficiente
+    const errores = [];
+    for (const item of items) {
+      const prod = productoMap[item.id_producto];
+      if (!prod) {
+        errores.push(`Producto ${item.id_producto} no encontrado.`);
+        continue;
+      }
+      if (prod.stock < item.cantidad) {
+        errores.push(
+          `"${prod.titulo}" solo tiene ${prod.stock} unidad(es) disponible(s) y pediste ${item.cantidad}.`
+        );
+      }
     }
 
-    res.json({ mensaje: 'Compra procesada', nuevoStock: r.rows[0].nuevo_stock });
+    if (errores.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: errores.join(' | ') });
+    }
+
+    // Calcular total
+    const total = items.reduce((sum, item) => {
+      return sum + Number(productoMap[item.id_producto].precio) * item.cantidad;
+    }, 0);
+
+    // Crear la venta
+    const rVenta = await client.query(
+      `INSERT INTO venta (id_cliente, total, estado) VALUES ($1, $2, 'pagada') RETURNING id_venta`,
+      [id_cliente, total.toFixed(2)]
+    );
+    const id_venta = rVenta.rows[0].id_venta;
+
+    // Insertar líneas — trg_restar_stock descuenta el stock automáticamente
+    for (const item of items) {
+      const prod     = productoMap[item.id_producto];
+      const subtotal = Number(prod.precio) * item.cantidad;
+      await client.query(
+        `INSERT INTO linea_venta (id_venta, id_producto, cantidad, p_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id_venta, item.id_producto, item.cantidad, prod.precio, subtotal.toFixed(2)]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      mensaje: '¡Compra procesada exitosamente!',
+      id_venta,
+      total: total.toFixed(2),
+    });
   } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /checkout:', err.message);
+    res.status(500).json({ error: 'Error al procesar la compra.' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /discos/:id/compra — compra individual (modo legacy, ahora con JWT y registro de venta)
+app.post('/discos/:id/compra', verificarToken, async (req, res) => {
+  const { id } = req.params;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
+
+  const id_cliente = req.usuario.id;
+  const client     = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const rProd = await client.query(
+      'SELECT id_producto, titulo, precio, stock FROM producto WHERE id_producto = $1 FOR UPDATE',
+      [id]
+    );
+    if (rProd.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Disco no encontrado.' });
+    }
+
+    const prod = rProd.rows[0];
+    if (prod.stock < 1) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'No hay stock disponible.' });
+    }
+
+    // Crear venta + línea; el trigger descuenta el stock
+    const rVenta = await client.query(
+      `INSERT INTO venta (id_cliente, total, estado) VALUES ($1, $2, 'pagada') RETURNING id_venta`,
+      [id_cliente, prod.precio]
+    );
+    await client.query(
+      `INSERT INTO linea_venta (id_venta, id_producto, cantidad, p_unitario, subtotal)
+       VALUES ($1, $2, 1, $3, $3)`,
+      [rVenta.rows[0].id_venta, id, prod.precio]
+    );
+
+    await client.query('COMMIT');
+
+    const rFinal = await pool.query(
+      'SELECT stock FROM producto WHERE id_producto = $1', [id]
+    );
+    res.json({ mensaje: 'Compra procesada.', nuevoStock: rFinal.rows[0].stock });
+  } catch (err) {
+    await client.query('ROLLBACK');
     console.error('POST /compra:', err.message);
-    res.status(500).json({ error: 'Error al procesar la compra' });
+    res.status(500).json({ error: 'Error al procesar la compra.' });
+  } finally {
+    client.release();
   }
 });
 
 
+// ══════════════════════════════════════════════════════════
 //  HISTORIA — /discos/:id/historia
+// ══════════════════════════════════════════════════════════
 
-// GET — obtener historia de un disco
+// GET — obtener historia de un disco (público)
 app.get('/discos/:id/historia', async (req, res) => {
   const { id } = req.params;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
+
   try {
     const r = await pool.query(
       'SELECT * FROM producto_historia WHERE id_producto = $1',
@@ -400,21 +577,19 @@ app.get('/discos/:id/historia', async (req, res) => {
     );
     if (r.rows.length === 0)
       return res.status(404).json({ error: 'Este disco aún no tiene historia.' });
-
     res.json(r.rows[0]);
   } catch (err) {
     console.error('GET /historia:', err.message);
-    res.status(500).json({ error: 'Error al obtener la historia' });
+    res.status(500).json({ error: 'Error al obtener la historia.' });
   }
 });
 
 // PUT — crear o actualizar historia (solo admin)
-app.put('/discos/:id/historia', async (req, res) => {
+app.put('/discos/:id/historia', verificarToken, soloAdmin, async (req, res) => {
   const { id } = req.params;
-  const { resumen, cuerpo, autor_editorial, nombre_usuario } = req.body;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
 
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'No tienes permiso para editar la historia.' });
+  const { resumen, cuerpo, autor_editorial } = req.body;
 
   try {
     const r = await pool.query(
@@ -430,7 +605,7 @@ app.put('/discos/:id/historia', async (req, res) => {
     res.json(r.rows[0]);
   } catch (err) {
     console.error('PUT /historia:', err.message);
-    res.status(500).json({ error: 'Error al guardar la historia' });
+    res.status(500).json({ error: 'Error al guardar la historia.' });
   }
 });
 
@@ -440,21 +615,19 @@ app.put('/discos/:id/historia', async (req, res) => {
 // ══════════════════════════════════════════════════════════
 
 // PUT — asignar o cambiar el video principal (solo admin)
-app.put('/discos/:id/video', async (req, res) => {
+app.put('/discos/:id/video', verificarToken, soloAdmin, async (req, res) => {
   const { id } = req.params;
-  const { youtube_id, descripcion, nombre_usuario } = req.body;
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
 
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'No tienes permiso para editar el video.' });
+  const { youtube_id, descripcion } = req.body;
 
   try {
-    if (!youtube_id) {
-      // Sin youtube_id → eliminar el video principal
+    if (!youtube_id?.trim()) {
       await pool.query(
         "DELETE FROM producto_video WHERE id_producto = $1 AND tipo = 'principal'",
         [id]
       );
-      return res.json({ mensaje: 'Video eliminado' });
+      return res.json({ mensaje: 'Video eliminado.' });
     }
 
     const r = await pool.query(
@@ -464,37 +637,34 @@ app.put('/discos/:id/video', async (req, res) => {
          SET youtube_id  = EXCLUDED.youtube_id,
              descripcion = EXCLUDED.descripcion
        RETURNING *`,
-      [id, youtube_id, descripcion ?? null]
+      [id, youtube_id.trim(), descripcion ?? null]
     );
     res.json(r.rows[0]);
   } catch (err) {
     console.error('PUT /video:', err.message);
-    res.status(500).json({ error: 'Error al guardar el video' });
+    res.status(500).json({ error: 'Error al guardar el video.' });
   }
 });
 
-// DELETE — quitar el video principal (solo admin)
-app.delete('/discos/:id/video', async (req, res) => {
+// DELETE — eliminar video principal (solo admin)
+app.delete('/discos/:id/video', verificarToken, soloAdmin, async (req, res) => {
   const { id } = req.params;
-  const { nombre_usuario } = req.body;
-
-  if (!(await esAdmin(nombre_usuario)))
-    return res.status(403).json({ error: 'No tienes permiso.' });
+  if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
 
   try {
     await pool.query(
       "DELETE FROM producto_video WHERE id_producto = $1 AND tipo = 'principal'",
       [id]
     );
-    res.json({ mensaje: 'Video eliminado' });
+    res.json({ mensaje: 'Video eliminado.' });
   } catch (err) {
     console.error('DELETE /video:', err.message);
-    res.status(500).json({ error: 'Error al eliminar el video' });
+    res.status(500).json({ error: 'Error al eliminar el video.' });
   }
 });
 
 
-//  INICIO DEL SERVIDOR
+// ── INICIO DEL SERVIDOR ───────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
