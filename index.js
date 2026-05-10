@@ -6,7 +6,6 @@ const bcrypt = require('bcrypt');
 const app = express();
 
 // 1. CONFIGURACIÓN DE BASE DE DATOS
-// Usamos el bloque ssl necesario para conectar con Neon desde Render
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
@@ -19,7 +18,7 @@ const pool = new Pool({
 });
 
 // 2. MIDDLEWARES
-app.use(cors()); // Permite que tu frontend en GitHub Pages haga peticiones al backend
+app.use(cors());
 app.use(express.json());
 
 // --- RUTAS DE USUARIOS ---
@@ -98,10 +97,10 @@ app.post('/discos', async (req, res) => {
   }
 });
 
-// ACTUALIZAR
+// ACTUALIZAR (incluye youtube_id)
 app.put('/discos/:id', async (req, res) => {
   const { id } = req.params;
-  const { titulo, artista, precio, stock, imagen_url, nombre_usuario } = req.body;
+  const { titulo, artista, precio, stock, imagen_url, youtube_id, nombre_usuario } = req.body;
 
   try {
     const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
@@ -112,11 +111,11 @@ app.put('/discos/:id', async (req, res) => {
 
     const query = `
       UPDATE discos 
-      SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5 
-      WHERE id = $6 
+      SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5, youtube_id = $6
+      WHERE id = $7
       RETURNING *`;
     
-    const valores = [titulo, artista, precio, stock, imagen_url, id];
+    const valores = [titulo, artista, precio, stock, imagen_url, youtube_id ?? null, id];
     const resultado = await pool.query(query, valores);
 
     if (resultado.rows.length === 0) {
@@ -177,13 +176,11 @@ app.post('/discos/:id/compra', async (req, res) => {
 });
 
 // INICIO DEL SERVIDOR
-// Usamos el puerto asignado por Render o el 3000 por defecto
 const PORT = process.env.PORT || 3000; 
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
   
-  // Prueba de salud de la base de datos
   pool.query('SELECT NOW()', (err) => {
     if (err) {
       console.log("❌ ERROR DE CONEXIÓN A DB:", err.message);
