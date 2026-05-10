@@ -97,6 +97,37 @@ const SQL_DISCOS = `
 
 
 // ══════════════════════════════════════════════════════════
+//  AUTH — /registro   (BUG 5 FIX: endpoint faltante — login.js lo llamaba pero no existía)
+// ══════════════════════════════════════════════════════════
+
+app.post('/registro', async (req, res) => {
+  const { nombre_usuario, password } = req.body;
+  if (!nombre_usuario || !password)
+    return res.status(400).json({ error: 'Nombre de usuario y contraseña son requeridos.' });
+  if (password.length < 6)
+    return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+
+  try {
+    const existe = await pool.query('SELECT id_usuario FROM usuario WHERE nombre = $1', [nombre_usuario]);
+    if (existe.rows.length > 0)
+      return res.status(409).json({ error: 'El nombre de usuario ya está en uso.' });
+
+    const hash = await bcrypt.hash(password, 10);
+    // correo se genera como placeholder único; si quieres requerirlo, pásalo desde el frontend
+    const correoPlaceholder = `${nombre_usuario}@vinylvibes.local`;
+    await pool.query(
+      `INSERT INTO usuario (nombre, correo, contrasena, rol) VALUES ($1, $2, $3, 'cliente')`,
+      [nombre_usuario, correoPlaceholder, hash]
+    );
+    res.status(201).json({ mensaje: 'Usuario creado exitosamente.' });
+  } catch (err) {
+    console.error('REGISTRO:', err.message);
+    res.status(500).json({ error: 'Error al crear la cuenta.' });
+  }
+});
+
+
+// ══════════════════════════════════════════════════════════
 //  AUTH — /login
 // ══════════════════════════════════════════════════════════
 
