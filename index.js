@@ -1,5 +1,5 @@
 require('dotenv').config();
-const cors = require('cors'); 
+const cors = require('cors');
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
@@ -12,65 +12,41 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
-  ssl: {
-    rejectUnauthorized: false 
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
 // 2. MIDDLEWARES
 app.use(cors());
 app.use(express.json());
 
-// --- RUTAS DE USUARIOS ---
-
-// REGISTRO
-app.post('/discos', async (req, res) => {
-  // Añadimos video_url a la destructuración
-  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body; 
-  try {
-    const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    if (!adminCheck.rows[0] || !adminCheck.rows[0].es_admin) {
-      return res.status(403).json({ error: "Acceso denegado." });
-    }
-
-    // Incluimos la sexta columna en el INSERT
-    const query = 'INSERT INTO discos (titulo, artista, precio, stock, imagen_url, video_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *';
-    const resultado = await pool.query(query, [titulo, artista, precio, stock, imagen_url, video_url]);
-    res.json(resultado.rows[0]);
-  } catch (error) {
-    console.error("❌ ERROR AL AGREGAR:", error.message);
-    res.status(500).json({ error: "Error al guardar en la base de datos" });
-  }
-});
+// ── USUARIOS ──────────────────────────────────────
 
 // LOGIN
 app.post('/login', async (req, res) => {
   const { nombre_usuario, password } = req.body;
   try {
-    const resultado = await pool.query('SELECT * FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    
-    if (resultado.rows.length === 0) {
-      return res.status(401).json({ error: "Usuario no encontrado" });
-    }
+    const resultado = await pool.query(
+      'SELECT * FROM usuarios WHERE nombre_usuario = $1',
+      [nombre_usuario]
+    );
+    if (resultado.rows.length === 0)
+      return res.status(401).json({ error: 'Usuario no encontrado' });
 
     const usuario = resultado.rows[0];
     const esCorrecta = await bcrypt.compare(password, usuario.password_hash);
 
     if (esCorrecta) {
-      res.json({ 
-        nombre: usuario.nombre_usuario, 
-        es_admin: usuario.es_admin 
-      });
+      res.json({ nombre: usuario.nombre_usuario, es_admin: usuario.es_admin });
     } else {
-      res.status(401).json({ error: "Contraseña incorrecta" });
+      res.status(401).json({ error: 'Contraseña incorrecta' });
     }
   } catch (error) {
-    console.error("❌ ERROR EN LOGIN:", error.message);
-    res.status(500).json({ error: "Error en el servidor" });
+    console.error('❌ ERROR EN LOGIN:', error.message);
+    res.status(500).json({ error: 'Error en el servidor' });
   }
 });
 
-// --- RUTAS DE DISCOS ---
+// ── DISCOS ────────────────────────────────────────
 
 // LEER DISCOS
 app.get('/discos', async (req, res) => {
@@ -78,115 +54,117 @@ app.get('/discos', async (req, res) => {
     const resultado = await pool.query('SELECT * FROM discos ORDER BY id ASC');
     res.json(resultado.rows);
   } catch (error) {
-    console.error("❌ ERROR EN DISCOS:", error.message);
-    res.status(500).json({ error: "No se pudieron cargar los discos" });
+    console.error('❌ ERROR EN GET /discos:', error.message);
+    res.status(500).json({ error: 'No se pudieron cargar los discos' });
   }
 });
 
-// AGREGAR DISCOS (Solo Admin)
+// AGREGAR DISCO (Solo Admin)
+// — ruta única POST /discos, incluye video_url desde el principio
 app.post('/discos', async (req, res) => {
-  const { titulo, artista, precio, stock, imagen_url, nombre_usuario } = req.body;
+  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body;
   try {
-    const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    
-    if (!adminCheck.rows[0] || !adminCheck.rows[0].es_admin) {
-      return res.status(403).json({ error: "Acceso denegado: No tienes permisos de administrador." });
-    }
-
-    const query = 'INSERT INTO discos (titulo, artista, precio, stock, imagen_url) VALUES ($1, $2, $3, $4, $5) RETURNING *';
-    const resultado = await pool.query(query, [titulo, artista, precio, stock, imagen_url]);
-    res.json(resultado.rows[0]);
-  } catch (error) {
-    console.error("❌ ERROR AL AGREGAR:", error.message);
-    res.status(500).json({ error: "Error al guardar en la base de datos" });
-  }
-});
-
-// ACTUALIZAR (incluye youtube_id)
-app.put('/discos/:id', async (req, res) => {
-  const { id } = req.params;
-  // Cambiamos youtube_id por video_url
-  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body; 
-
-  try {
-    const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    if (!adminCheck.rows[0]?.es_admin) {
-      return res.status(403).json({ error: "No tienes permiso." });
-    }
+    const adminCheck = await pool.query(
+      'SELECT es_admin FROM usuarios WHERE nombre_usuario = $1',
+      [nombre_usuario]
+    );
+    if (!adminCheck.rows[0]?.es_admin)
+      return res.status(403).json({ error: 'Acceso denegado: no tienes permisos de administrador.' });
 
     const query = `
-      UPDATE discos 
+      INSERT INTO discos (titulo, artista, precio, stock, imagen_url, video_url)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *`;
+    const resultado = await pool.query(query, [
+      titulo, artista, precio, stock, imagen_url, video_url ?? null
+    ]);
+    res.json(resultado.rows[0]);
+  } catch (error) {
+    console.error('❌ ERROR EN POST /discos:', error.message);
+    res.status(500).json({ error: 'Error al guardar en la base de datos' });
+  }
+});
+
+// ACTUALIZAR DISCO (Solo Admin) — incluye video_url
+app.put('/discos/:id', async (req, res) => {
+  const { id } = req.params;
+  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body;
+
+  try {
+    const adminCheck = await pool.query(
+      'SELECT es_admin FROM usuarios WHERE nombre_usuario = $1',
+      [nombre_usuario]
+    );
+    if (!adminCheck.rows[0]?.es_admin)
+      return res.status(403).json({ error: 'No tienes permiso.' });
+
+    const query = `
+      UPDATE discos
       SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5, video_url = $6
       WHERE id = $7
       RETURNING *`;
-    
-    // Usamos video_url en los valores
-    const valores = [titulo, artista, precio, stock, imagen_url, video_url ?? null, id]; 
-    const resultado = await pool.query(query, valores);
+    const resultado = await pool.query(query, [
+      titulo, artista, precio, stock, imagen_url, video_url ?? null, id
+    ]);
 
-    if (resultado.rows.length === 0) return res.status(404).json({ error: "Disco no encontrado" });
+    if (resultado.rows.length === 0)
+      return res.status(404).json({ error: 'Disco no encontrado' });
+
     res.json(resultado.rows[0]);
   } catch (error) {
-    console.error("❌ ERROR CRÍTICO EN PUT /discos:", error.message);
-    res.status(500).json({ error: "Error interno del servidor" });
+    console.error('❌ ERROR EN PUT /discos:', error.message);
+    res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
-// BORRAR DISCOS (Solo Admin)
+
+// BORRAR DISCO (Solo Admin)
 app.delete('/discos/:id', async (req, res) => {
   const { id } = req.params;
   const { nombre_usuario } = req.body;
   try {
-    const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    
-    if (!adminCheck.rows[0] || !adminCheck.rows[0].es_admin) {
-      return res.status(403).json({ error: "No tienes permiso para borrar discos." });
-    }
+    const adminCheck = await pool.query(
+      'SELECT es_admin FROM usuarios WHERE nombre_usuario = $1',
+      [nombre_usuario]
+    );
+    if (!adminCheck.rows[0]?.es_admin)
+      return res.status(403).json({ error: 'No tienes permiso para borrar discos.' });
 
     await pool.query('DELETE FROM discos WHERE id = $1', [id]);
-    res.json({ mensaje: "Disco eliminado correctamente" });
+    res.json({ mensaje: 'Disco eliminado correctamente' });
   } catch (error) {
-    console.error("❌ ERROR AL BORRAR:", error.message);
-    res.status(500).json({ error: "Error al eliminar el disco" });
+    console.error('❌ ERROR EN DELETE /discos:', error.message);
+    res.status(500).json({ error: 'Error al eliminar el disco' });
   }
 });
 
-// RUTA ESPECIAL PARA COMPRAS
+// COMPRAR DISCO
 app.post('/discos/:id/compra', async (req, res) => {
   const { id } = req.params;
-  
   try {
     const disco = await pool.query('SELECT stock FROM discos WHERE id = $1', [id]);
-    
-    if (disco.rows.length === 0) return res.status(404).json({ error: "Disco no encontrado" });
-    
+    if (disco.rows.length === 0)
+      return res.status(404).json({ error: 'Disco no encontrado' });
+
     const stockActual = disco.rows[0].stock;
-    
-    if (stockActual <= 0) {
-      return res.status(400).json({ error: "No hay stock disponible" });
-    }
+    if (stockActual <= 0)
+      return res.status(400).json({ error: 'No hay stock disponible' });
 
     const nuevoStock = stockActual - 1;
     await pool.query('UPDATE discos SET stock = $2 WHERE id = $1', [id, nuevoStock]);
-
-    res.json({ mensaje: "Compra procesada", nuevoStock });
-    
+    res.json({ mensaje: 'Compra procesada', nuevoStock });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error al procesar la compra" });
+    console.error('❌ ERROR EN /compra:', error.message);
+    res.status(500).json({ error: 'Error al procesar la compra' });
   }
 });
 
-// INICIO DEL SERVIDOR
-const PORT = process.env.PORT || 3000; 
+// ── INICIO DEL SERVIDOR ───────────────────────────
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
-  
   pool.query('SELECT NOW()', (err) => {
-    if (err) {
-      console.log("❌ ERROR DE CONEXIÓN A DB:", err.message);
-    } else {
-      console.log("✅ Conexión a PostgreSQL exitosa.");
-    }
+    if (err) console.log('❌ ERROR DE CONEXIÓN A DB:', err.message);
+    else     console.log('✅ Conexión a PostgreSQL exitosa.');
   });
 });
