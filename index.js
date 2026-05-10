@@ -24,17 +24,22 @@ app.use(express.json());
 // --- RUTAS DE USUARIOS ---
 
 // REGISTRO
-app.post('/registro', async (req, res) => {
-  const { nombre_usuario, password } = req.body;
+app.post('/discos', async (req, res) => {
+  // Añadimos video_url a la destructuración
+  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body; 
   try {
-    const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(password, saltRounds);
-    const query = 'INSERT INTO usuarios (nombre_usuario, password_hash) VALUES ($1, $2) RETURNING *';
-    await pool.query(query, [nombre_usuario, passwordHash]);
-    res.json({ mensaje: "Usuario creado con éxito" });
+    const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
+    if (!adminCheck.rows[0] || !adminCheck.rows[0].es_admin) {
+      return res.status(403).json({ error: "Acceso denegado." });
+    }
+
+    // Incluimos la sexta columna en el INSERT
+    const query = 'INSERT INTO discos (titulo, artista, precio, stock, imagen_url, video_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *';
+    const resultado = await pool.query(query, [titulo, artista, precio, stock, imagen_url, video_url]);
+    res.json(resultado.rows[0]);
   } catch (error) {
-    console.error("❌ ERROR EN REGISTRO:", error.message);
-    res.status(500).json({ error: "El usuario ya existe o error de servidor" });
+    console.error("❌ ERROR AL AGREGAR:", error.message);
+    res.status(500).json({ error: "Error al guardar en la base de datos" });
   }
 });
 
@@ -100,36 +105,32 @@ app.post('/discos', async (req, res) => {
 // ACTUALIZAR (incluye youtube_id)
 app.put('/discos/:id', async (req, res) => {
   const { id } = req.params;
-  const { titulo, artista, precio, stock, imagen_url, youtube_id, nombre_usuario } = req.body;
+  // Cambiamos youtube_id por video_url
+  const { titulo, artista, precio, stock, imagen_url, video_url, nombre_usuario } = req.body; 
 
   try {
     const adminCheck = await pool.query('SELECT es_admin FROM usuarios WHERE nombre_usuario = $1', [nombre_usuario]);
-    
     if (!adminCheck.rows[0]?.es_admin) {
-      return res.status(403).json({ error: "No tienes permiso de administrador." });
+      return res.status(403).json({ error: "No tienes permiso." });
     }
 
     const query = `
       UPDATE discos 
-      SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5, youtube_id = $6
+      SET titulo = $1, artista = $2, precio = $3, stock = $4, imagen_url = $5, video_url = $6
       WHERE id = $7
       RETURNING *`;
     
-    const valores = [titulo, artista, precio, stock, imagen_url, youtube_id ?? null, id];
+    // Usamos video_url en los valores
+    const valores = [titulo, artista, precio, stock, imagen_url, video_url ?? null, id]; 
     const resultado = await pool.query(query, valores);
 
-    if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Disco no encontrado" });
-    }
-
+    if (resultado.rows.length === 0) return res.status(404).json({ error: "Disco no encontrado" });
     res.json(resultado.rows[0]);
-
   } catch (error) {
     console.error("❌ ERROR CRÍTICO EN PUT /discos:", error.message);
     res.status(500).json({ error: "Error interno del servidor" });
   }
 });
-
 // BORRAR DISCOS (Solo Admin)
 app.delete('/discos/:id', async (req, res) => {
   const { id } = req.params;
