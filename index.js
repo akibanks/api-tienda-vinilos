@@ -430,7 +430,7 @@ app.delete('/discos/:id', verificarToken, soloAdmin, async (req, res) => {
 // ══════════════════════════════════════════════════════════
 
 app.post('/checkout', verificarToken, async (req, res) => {
-  const { items } = req.body;
+  const { items, envio } = req.body;
   const id_cliente = req.usuario.id;
 
   if (!Array.isArray(items) || items.length === 0)
@@ -441,6 +441,11 @@ app.post('/checkout', verificarToken, async (req, res) => {
     if (!Number.isInteger(item.id_producto) || !Number.isInteger(item.cantidad) || item.cantidad < 1)
       return res.status(400).json({ error: 'Formato de artículos inválido.' });
   }
+
+  // Validar datos de envío
+  if (!envio || !envio.nombre_receptor || !envio.calle || !envio.numero_ext ||
+      !envio.colonia || !envio.ciudad || !envio.estado || !envio.codigo_postal)
+    return res.status(400).json({ error: 'Los datos de envío son requeridos.' });
 
   const client = await pool.connect();
   try {
@@ -500,6 +505,26 @@ app.post('/checkout', verificarToken, async (req, res) => {
       );
     }
 
+    // Registrar datos de envío
+    await client.query(
+      `INSERT INTO envio
+         (id_venta, nombre_receptor, calle, numero_ext, numero_int,
+          colonia, ciudad, estado, codigo_postal, referencias)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        id_venta,
+        envio.nombre_receptor.trim(),
+        envio.calle.trim(),
+        envio.numero_ext.trim(),
+        envio.numero_int?.trim() || null,
+        envio.colonia.trim(),
+        envio.ciudad.trim(),
+        envio.estado.trim(),
+        envio.codigo_postal.trim(),
+        envio.referencias?.trim() || null,
+      ]
+    );
+
     await client.query('COMMIT');
     res.status(201).json({
       mensaje: '¡Compra procesada exitosamente!',
@@ -519,6 +544,11 @@ app.post('/checkout', verificarToken, async (req, res) => {
 app.post('/discos/:id/compra', verificarToken, async (req, res) => {
   const { id } = req.params;
   if (isNaN(id)) return res.status(400).json({ error: 'ID inválido.' });
+
+  const { envio } = req.body;
+  if (!envio || !envio.nombre_receptor || !envio.calle || !envio.numero_ext ||
+      !envio.colonia || !envio.ciudad || !envio.estado || !envio.codigo_postal)
+    return res.status(400).json({ error: 'Los datos de envío son requeridos.' });
 
   const id_cliente = req.usuario.id;
   const client     = await pool.connect();
@@ -550,6 +580,26 @@ app.post('/discos/:id/compra', verificarToken, async (req, res) => {
       `INSERT INTO linea_venta (id_venta, id_producto, cantidad, p_unitario, subtotal)
        VALUES ($1, $2, 1, $3, $3)`,
       [rVenta.rows[0].id_venta, id, prod.precio]
+    );
+
+    // Registrar datos de envío
+    await client.query(
+      `INSERT INTO envio
+         (id_venta, nombre_receptor, calle, numero_ext, numero_int,
+          colonia, ciudad, estado, codigo_postal, referencias)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        rVenta.rows[0].id_venta,
+        envio.nombre_receptor.trim(),
+        envio.calle.trim(),
+        envio.numero_ext.trim(),
+        envio.numero_int?.trim() || null,
+        envio.colonia.trim(),
+        envio.ciudad.trim(),
+        envio.estado.trim(),
+        envio.codigo_postal.trim(),
+        envio.referencias?.trim() || null,
+      ]
     );
 
     await client.query('COMMIT');
