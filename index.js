@@ -403,6 +403,13 @@ app.delete('/discos/:id', verificarToken, soloAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Disco no encontrado.' });
     res.json({ mensaje: 'Disco eliminado correctamente.' });
   } catch (err) {
+    // Código 23503 = foreign_key_violation en PostgreSQL
+    // Significa que el disco tiene ventas registradas y no se puede borrar
+    if (err.code === '23503') {
+      return res.status(409).json({
+        error: 'Este disco tiene ventas registradas y no puede eliminarse para conservar el historial contable. Puedes poner su stock en 0 para que no aparezca disponible.',
+      });
+    }
     console.error('DELETE /discos/:id:', err.message);
     res.status(500).json({ error: 'Error al eliminar el disco.' });
   }
