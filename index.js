@@ -1,26 +1,7 @@
-// ══════════════════════════════════════════════════════════
-//  VinylVibes — index.js  (backend v2)
-//
-//  Cambios respecto a v1:
-//    · JWT reemplaza el chequeo de admin por nombre en el body.
-//    · soloAdmin usa el payload del token, no una query a la BD.
-//    · /checkout crea venta + linea_venta en una sola transacción
-//      atómica con SELECT … FOR UPDATE (sin condiciones de carrera).
-//    · /discos/:id/compra también registra venta/linea_venta y usa JWT.
-//    · Stock se descuenta vía triggers de la BD (trg_restar_stock).
-//    · CORS configurable por variable de entorno CORS_ORIGIN.
-//    · Validación de inputs más estricta en todos los endpoints.
-//
 //  Variables de entorno requeridas (.env):
 //    DB_USER, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT
-//    JWT_SECRET        — clave secreta para firmar tokens (¡cambiar en producción!)
-//    CORS_ORIGIN       — lista separada por comas de orígenes permitidos
-//                        (ej: https://tuusuario.github.io,https://vinylvibes.com)
-//                        Si está vacía, acepta cualquier origen (útil en desarrollo).
-//    PORT              — puerto del servidor (default 3000)
-//
-//  Dependencias nuevas: npm install jsonwebtoken
-// ══════════════════════════════════════════════════════════
+//    JWT_SECRET       
+//    CORS_ORIGIN       
 
 require('dotenv').config();
 const cors    = require('cors');
@@ -45,8 +26,7 @@ const pool = new Pool({
 
 // ── MIDDLEWARES ───────────────────────────────────────────
 
-// CORS: restringe orígenes mediante CORS_ORIGIN; sin configurar acepta todo
-// (conveniente para desarrollo local y Render previews).
+// CORS: 
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map(o => o.trim())
@@ -54,7 +34,7 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Peticiones sin origen (curl, Postman, mismo origen) siempre pasan.
+ 
     if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
       cb(null, true);
     } else {
