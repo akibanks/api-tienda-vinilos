@@ -10,7 +10,7 @@ const { Pool } = require('pg');
 const bcrypt  = require('bcrypt');
 const jwt     = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_cambiar_en_produccion';
+const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRY = '7d';
 
 const app  = express();
