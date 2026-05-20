@@ -2,7 +2,7 @@
 //    DB_USER, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT
 //    JWT_SECRET       
 //    CORS_ORIGIN       
-
+//
 require('dotenv').config();
 const cors    = require('cors');
 const express = require('express');
