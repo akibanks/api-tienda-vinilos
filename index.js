@@ -8,7 +8,8 @@ const cors    = require('cors');
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt  = require('bcrypt');
-const jwt     = require('jsonwebtoken');
+const jwt       = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRY = '7d';
@@ -45,6 +46,27 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+
+// ── RATE LIMITING ─────────────────────────────────────────
+
+// Límite general: 100 peticiones por IP cada minuto
+app.use(rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max:      100,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Demasiadas peticiones. Intenta de nuevo en un minuto.' },
+}));
+
+// Límite estricto para login y registro: 10 intentos cada 15 minutos
+const limitarAuth = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max:      10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Demasiados intentos. Intenta de nuevo en 15 minutos.' },
+});
 
 
 // ── MIDDLEWARES DE AUTH ───────────────────────────────────
@@ -137,7 +159,7 @@ const SQL_DISCOS = `
 //  AUTH — /registro
 // ══════════════════════════════════════════════════════════
 
-app.post('/registro', async (req, res) => {
+app.post('/registro', limitarAuth, async (req, res) => {
   const { nombre_usuario, password } = req.body;
 
   if (!nombre_usuario?.trim() || !password)
@@ -172,7 +194,7 @@ app.post('/registro', async (req, res) => {
 //  AUTH — /login
 // ══════════════════════════════════════════════════════════
 
-app.post('/login', async (req, res) => {
+app.post('/login', limitarAuth, async (req, res) => {
   const { nombre_usuario, password } = req.body;
 
   if (!nombre_usuario?.trim() || !password)
