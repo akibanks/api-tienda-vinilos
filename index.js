@@ -701,6 +701,163 @@ app.delete('/discos/:id/video', verificarToken, soloAdmin, async (req, res) => {
 });
 
 
+
+// ══════════════════════════════════════════════════════════
+//  DISCOGS — Búsqueda e importación automática
+//  Usa Discogs para datos del disco, YouTube para el video
+//  y Last.fm para la historia del álbum.
+// ══════════════════════════════════════════════════════════
+
+const DISCOGS_TOKEN   = process.env.DISCOGS_TOKEN;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const LASTFM_API_KEY  = process.env.LASTFM_API_KEY;
+
+const DISCOGS_HEADERS = {
+  'Authorization': `Discogs token=${DISCOGS_TOKEN}`,
+  'User-Agent':    'VinylVibes/1.0 +https://akibanks.github.io',
+};
+
+// GET /discogs/buscar?q=query&pagina=1 — busca discos en Discogs (solo admin)
+app.get('/discogs/buscar', verificarToken, soloAdmin, async (req, res) => {
+  const { q, pagina = 1 } = req.query;
+  if (!q?.trim())
+    return res.status(400).json({ error: 'El parámetro q es requerido.' });
+
+  try {
+    const url  = `https://api.discogs.com/database/search?q=${encodeURIComponent(q)}&type=release&per_page=20&page=${pagina}`;
+    const resp = await fetch(url, { headers: DISCOGS_HEADERS });
+    const data = await resp.json();
+
+    const resultados = (data.results || []).map(r => ({
+      discogs_id: r.id,
+      titulo:     r.title,
+      anio:       r.year   || null,
+      genero:     r.genre?.[0] || null,
+      imagen_url: r.cover_image || null,
+      artista:    r.title.includes(' - ') ? r.title.split(' - ')[0].trim() : null,
+    }));
+
+    res.json({ resultados, total: data.pagination?.items || 0 });
+  } catch (err) {
+    console.error('GET /discogs/buscar:', err.message);
+    res.status(500).json({ error: 'Error al buscar en Discogs.' });
+  }
+});
+
+// POST /discogs/importar — importa un disco de Discogs a la BD (solo admin)
+// Body: { discogs_id, precio, stock }
+app.post('/discogs/importar', verificarToken, soloAdmin, async (req, res) => {
+  const { discogs_id, precio, stock = 10 } = req.body;
+
+  if (!discogs_id)
+    return res.status(400).json({ error: 'discogs_id es requerido.' });
+  if (typeof precio !== 'number' || precio < 0)
+    return res.status(400).json({ error: 'El precio debe ser un número positivo.' });
+
+  const client = await pool.connect();
+  try {
+    // 1. Obtener detalles del disco desde Discogs
+    const discogsResp = await fetch(
+      `https://api.discogs.com/releases/${discogs_id}`,
+      { headers: DISCOGS_HEADERS }
+    );
+    if (!discogsResp.ok)
+      return res.status(404).json({ error: 'Disco no encontrado en Discogs.' });
+
+    const disco   = await discogsResp.json();
+    const titulo  = disco.title;
+    const anio    = disco.year    || null;
+    const genero  = disco.genres?.[0] || disco.styles?.[0] || null;
+    const imagen  = disco.images?.[0]?.uri || null;
+    const artistas = (disco.artists || [])
+      .map(a => a.name.replace(/\s*\(\d+\)$/, '').trim())
+      .filter(Boolean);
+    const artistaPrincipal = artistas[0] || 'Desconocido';
+
+    // 2. Buscar video en YouTube
+    let youtubeId = null;
+    try {
+      const ytQuery = encodeURIComponent(`${titulo} ${artistaPrincipal} album`);
+      const ytResp  = await fetch(
+        `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${ytQuery}&type=video&maxResults=1&key=${YOUTUBE_API_KEY}`
+      );
+      const ytData  = await ytResp.json();
+      youtubeId     = ytData.items?.[0]?.id?.videoId || null;
+    } catch (e) {
+      console.warn('YouTube search fallado:', e.message);
+    }
+
+    // 3. Obtener historia desde Last.fm
+    let historia = null;
+    try {
+      const lfResp = await fetch(
+        `https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${LASTFM_API_KEY}&artist=${encodeURIComponent(artistaPrincipal)}&album=${encodeURIComponent(titulo)}&format=json`
+      );
+      const lfData = await lfResp.json();
+      historia = lfData.album?.wiki?.content
+        ?.replace(/<a[^>]*>.*?<\/a>/g, '')
+        ?.replace(/<[^>]+>/g, '')
+        ?.trim() || null;
+      if (historia === '') historia = null;
+    } catch (e) {
+      console.warn('Last.fm fetch fallado:', e.message);
+    }
+
+    // 4. Guardar todo en la BD dentro de una transacción
+    await client.query('BEGIN');
+
+    const rProd = await client.query(
+      `INSERT INTO producto (titulo, precio, anio, stock, url_img, genero)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_producto`,
+      [titulo, precio, anio, stock, imagen, genero]
+    );
+    const id_producto = rProd.rows[0].id_producto;
+
+    for (const nombre of artistas) {
+      const id_artista = await obtenerOCrearArtista(client, nombre);
+      await client.query(
+        'INSERT INTO producto_artista (id_producto, id_artista) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [id_producto, id_artista]
+      );
+    }
+
+    if (youtubeId) {
+      await client.query(
+        `INSERT INTO producto_video (id_producto, youtube_id, tipo) VALUES ($1, $2, 'principal')`,
+        [id_producto, youtubeId]
+      );
+    }
+
+    if (historia) {
+      await client.query(
+        `INSERT INTO producto_historia (id_producto, cuerpo) VALUES ($1, $2)`,
+        [id_producto, historia]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      mensaje:    `"${titulo}" importado exitosamente.`,
+      id_producto,
+      titulo,
+      artista:    artistas.join(', '),
+      anio,
+      genero,
+      imagen_url: imagen,
+      video:      youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null,
+      historia:   historia  ? 'Historia importada desde Last.fm' : 'Sin historia disponible',
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /discogs/importar:', err.message);
+    res.status(500).json({ error: 'Error al importar el disco.' });
+  } finally {
+    client.release();
+  }
+});
+
 // ── INICIO DEL SERVIDOR ───────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
