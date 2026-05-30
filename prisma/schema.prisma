@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum estado_venta {
+  pendiente
+  pagada
+  enviada
+  entregada
+  cancelada
+}
+
+enum rol_usuario {
+  cliente
+  vendedor
+  admin
+}
+
+model usuario {
+  id_usuario Int                 @id @default(autoincrement())
+  nombre     String              @unique @db.VarChar(100)
+  correo     String              @unique @db.VarChar(150)
+  contrasena String              @db.VarChar(255)
+  rol        rol_usuario         @default(cliente)
+  created_at DateTime            @default(now())
+  updated_at DateTime            @default(now())
+  ventas     venta[]
+  historial  historial_usuario[]
+}
+
+model venta {
+  id_venta   Int          @id @default(autoincrement())
+  id_cliente Int
+  total      Decimal      @default(0) @db.Decimal(12, 2)
+  estado     estado_venta @default(pendiente)
+  fecha      DateTime     @default(now())
+  updated_at DateTime     @default(now())
+  cliente    usuario      @relation(fields: [id_cliente], references: [id_usuario])
+  lineas     linea_venta[]
+  envio      envio?
+}
+
+model linea_venta {
+  id_linea   Int     @id @default(autoincrement())
+  id_venta   Int
+  discogs_id String  @db.VarChar(20)
+  titulo     String  @db.VarChar(200)
+  artista    String  @db.VarChar(200)
+  cantidad   Int
+  p_unitario Decimal @db.Decimal(10, 2)
+  subtotal   Decimal @db.Decimal(10, 2)
+  venta      venta   @relation(fields: [id_venta], references: [id_venta], onDelete: Cascade)
+
+  @@unique([id_venta, discogs_id])
+}
+
+model envio {
+  id_envio        Int      @id @default(autoincrement())
+  id_venta        Int      @unique
+  nombre_receptor String   @db.VarChar(120)
+  calle           String   @db.VarChar(200)
+  numero_ext      String   @db.VarChar(20)
+  numero_int      String?  @db.VarChar(20)
+  colonia         String   @db.VarChar(100)
+  ciudad          String   @db.VarChar(100)
+  estado          String   @db.VarChar(100)
+  codigo_postal   String   @db.VarChar(10)
+  referencias     String?
+  created_at      DateTime @default(now())
+  venta           venta    @relation(fields: [id_venta], references: [id_venta], onDelete: Cascade)
+}
+
+model historial_usuario {
+  id_historial Int      @id @default(autoincrement())
+  id_usuario   Int
+  discogs_id   String   @db.VarChar(20)
+  titulo       String   @db.VarChar(200)
+  artista      String   @db.VarChar(200)
+  genero       String?  @db.VarChar(80)
+  estilo       String?  @db.VarChar(80)
+  visto_en     DateTime @default(now())
+  usuario      usuario  @relation(fields: [id_usuario], references: [id_usuario], onDelete: Cascade)
+
+  @@index([id_usuario])
+  @@index([discogs_id])
+  @@index([visto_en(sort: Desc)])
+}
