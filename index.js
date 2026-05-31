@@ -714,6 +714,126 @@ app.post('/checkout', verificarToken, async (req, res) => {
 });
 
 
+
+// ══════════════════════════════════════════════════════════
+//  ADMIN — /admin/usuarios  /admin/ventas
+// ══════════════════════════════════════════════════════════
+
+// GET /admin/usuarios — lista todos los usuarios
+app.get('/admin/usuarios', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const usuarios = await prisma.usuario.findMany({
+      orderBy: { created_at: 'desc' },
+      select: {
+        id_usuario: true,
+        nombre:     true,
+        correo:     true,
+        rol:        true,
+        created_at: true,
+      },
+    });
+    res.json(usuarios);
+  } catch (err) {
+    console.error('GET /admin/usuarios:', err.message);
+    res.status(500).json({ error: 'Error al obtener usuarios.' });
+  }
+});
+
+// PUT /admin/usuarios/:id/rol — cambiar rol de un usuario
+app.put('/admin/usuarios/:id/rol', verificarToken, soloAdmin, async (req, res) => {
+  const id  = parseInt(req.params.id);
+  const { rol } = req.body;
+
+  if (!['cliente', 'vendedor', 'admin'].includes(rol))
+    return res.status(400).json({ error: 'Rol inválido.' });
+
+  try {
+    await prisma.usuario.update({
+      where: { id_usuario: id },
+      data:  { rol },
+    });
+    res.json({ mensaje: `Rol actualizado a "${rol}".` });
+  } catch (err) {
+    console.error('PUT /admin/usuarios/:id/rol:', err.message);
+    res.status(500).json({ error: 'Error al actualizar el rol.' });
+  }
+});
+
+// DELETE /admin/usuarios/:id — eliminar un usuario
+app.delete('/admin/usuarios/:id', verificarToken, soloAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+
+  if (id === req.usuario.id)
+    return res.status(400).json({ error: 'No puedes eliminarte a ti mismo.' });
+
+  try {
+    await prisma.usuario.delete({ where: { id_usuario: id } });
+    res.json({ mensaje: 'Usuario eliminado.' });
+  } catch (err) {
+    console.error('DELETE /admin/usuarios/:id:', err.message);
+    res.status(500).json({ error: 'Error al eliminar el usuario.' });
+  }
+});
+
+// GET /admin/ventas — lista todas las ventas
+app.get('/admin/ventas', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const ventas = await prisma.venta.findMany({
+      orderBy: { fecha: 'desc' },
+      include: {
+        cliente: {
+          select: { id_usuario: true, nombre: true },
+        },
+      },
+    });
+    res.json(ventas);
+  } catch (err) {
+    console.error('GET /admin/ventas:', err.message);
+    res.status(500).json({ error: 'Error al obtener ventas.' });
+  }
+});
+
+// GET /admin/ventas/:id — detalle de una venta
+app.get('/admin/ventas/:id', verificarToken, soloAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const venta = await prisma.venta.findUnique({
+      where:   { id_venta: id },
+      include: {
+        cliente: { select: { id_usuario: true, nombre: true } },
+        lineas:  true,
+        envio:   true,
+      },
+    });
+    if (!venta) return res.status(404).json({ error: 'Venta no encontrada.' });
+    res.json(venta);
+  } catch (err) {
+    console.error('GET /admin/ventas/:id:', err.message);
+    res.status(500).json({ error: 'Error al obtener la venta.' });
+  }
+});
+
+// PUT /admin/ventas/:id/estado — cambiar estado de una venta
+app.put('/admin/ventas/:id/estado', verificarToken, soloAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { estado } = req.body;
+
+  const estadosValidos = ['pendiente', 'pagada', 'enviada', 'entregada', 'cancelada'];
+  if (!estadosValidos.includes(estado))
+    return res.status(400).json({ error: 'Estado inválido.' });
+
+  try {
+    await prisma.venta.update({
+      where: { id_venta: id },
+      data:  { estado },
+    });
+    res.json({ mensaje: `Estado actualizado a "${estado}".` });
+  } catch (err) {
+    console.error('PUT /admin/ventas/:id/estado:', err.message);
+    res.status(500).json({ error: 'Error al actualizar el estado.' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════
 //  INICIO DEL SERVIDOR
 // ══════════════════════════════════════════════════════════
