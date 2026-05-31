@@ -111,13 +111,41 @@ function soloAdmin(req, res, next) {
 
 // ── HELPERS ───────────────────────────────────────────────
 
-/** Calcula el precio del disco según su año de lanzamiento. */
-function calcularPrecio(anio) {
-  if (!anio)        return 24.99;
-  if (anio >= 2000) return 19.99;
-  if (anio >= 1980) return 29.99;
-  if (anio >= 1960) return 34.99;
-  return 39.99;
+/** Calcula el precio del disco según popularidad y año. */
+function calcularPrecio(anio, have = 0, want = 0) {
+  // Base por año
+  let base;
+  if (!anio)        base = 24.99;
+  else if (anio >= 2000) base = 19.99;
+  else if (anio >= 1980) base = 29.99;
+  else if (anio >= 1960) base = 34.99;
+  else                   base = 39.99;
+
+  // Ajuste por popularidad (ratio want/have)
+  const ratio = have > 0 ? want / have : 0;
+  if (ratio >= 1.5)      base = Math.min(base * 1.4, base + 15); // muy deseado
+  else if (ratio >= 0.8) base = Math.min(base * 1.2, base + 8);  // bastante deseado
+  else if (ratio <= 0.1) base = Math.max(base * 0.85, base - 5); // poco deseado
+
+  return Math.round(base * 100) / 100;
+}
+
+/** Obtiene estadísticas de popularidad de Discogs. */
+async function obtenerStats(discogsId) {
+  try {
+    const resp = await fetch(
+      `https://api.discogs.com/releases/${discogsId}/stats`,
+      { headers: DISCOGS_HEADERS }
+    );
+    if (!resp.ok) return { have: 0, want: 0 };
+    const data = await resp.json();
+    return {
+      have: data.num_have || 0,
+      want: data.num_want || 0,
+    };
+  } catch (e) {
+    return { have: 0, want: 0 };
+  }
 }
 
 /** Limpia el nombre del artista quitando el sufijo (2), (3), etc. de Discogs. */
@@ -159,6 +187,9 @@ function formatearResultadoDiscogs(item) {
 
   const anio = item.year || null;
 
+  const have = item.community?.have || 0;
+  const want = item.community?.want || 0;
+
   return {
     discogs_id: String(item.id),
     titulo,
@@ -167,7 +198,9 @@ function formatearResultadoDiscogs(item) {
     genero:     item.genre?.[0]  || null,
     estilo:     item.style?.[0]  || null,
     imagen_url: item.cover_image || null,
-    precio:     calcularPrecio(anio),
+    precio:     calcularPrecio(anio, have, want),
+    have,
+    want,
   };
 }
 
@@ -343,6 +376,8 @@ app.get('/disco/:id', async (req, res) => {
       const artistas = (data.artists || []).map(a => limpiarArtista(a.name));
       const anio     = data.year || null;
 
+      const stats = await obtenerStats(String(data.id));
+
       return {
         discogs_id: String(data.id),
         titulo:     data.title,
@@ -356,7 +391,9 @@ app.get('/disco/:id', async (req, res) => {
           titulo:   t.title,
           duracion: t.duration,
         })),
-        precio: calcularPrecio(anio),
+        precio: calcularPrecio(anio, stats.have, stats.want),
+        have:   stats.have,
+        want:   stats.want,
         sello:  data.labels?.[0]?.name || null,
         pais:   data.country || null,
       };
@@ -400,19 +437,25 @@ app.get('/disco/:id/historia', async (req, res) => {
     }
 
     const resultado = await cachear(clave, TTL.HISTORIA, async () => {
-      const lfResp = await fetch(
-        `https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${LASTFM_API_KEY}&artist=${encodeURIComponent(disco.artista)}&album=${encodeURIComponent(disco.titulo)}&format=json&lang=es`
-      );
-      const lfData = await lfResp.json();
+      const buscarHistoria = async (lang) => {
+        const lfResp = await fetch(
+          `https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${LASTFM_API_KEY}&artist=${encodeURIComponent(disco.artista)}&album=${encodeURIComponent(disco.titulo)}&format=json&lang=${lang}`
+        );
+        const lfData = await lfResp.json();
+        let cuerpo = lfData.album?.wiki?.content || null;
+        if (cuerpo) {
+          cuerpo = cuerpo
+            .replace(/<a[^>]*>.*?<\/a>/gs, '')
+            .replace(/<[^>]+>/g, '')
+            .trim();
+          if (cuerpo.length < 50) cuerpo = null;
+        }
+        return cuerpo;
+      };
 
-      let cuerpo = lfData.album?.wiki?.content || null;
-      if (cuerpo) {
-        cuerpo = cuerpo
-          .replace(/<a[^>]*>.*?<\/a>/gs, '')
-          .replace(/<[^>]+>/g, '')
-          .trim();
-        if (cuerpo.length < 50) cuerpo = null;
-      }
+      // Intentar español primero, luego inglés
+      let cuerpo = await buscarHistoria('es');
+      if (!cuerpo) cuerpo = await buscarHistoria('en');
 
       return cuerpo ? { cuerpo } : null;
     });
