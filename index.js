@@ -764,6 +764,65 @@ app.post('/checkout', verificarToken, async (req, res) => {
 
 
 
+
+// ══════════════════════════════════════════════════════════
+//  MIS COMPRAS — /mis-compras
+// ══════════════════════════════════════════════════════════
+
+// GET /mis-compras — historial de compras del usuario logueado
+app.get('/mis-compras', verificarToken, async (req, res) => {
+  try {
+    const ventas = await prisma.venta.findMany({
+      where:   { id_cliente: req.usuario.id },
+      orderBy: { fecha: 'desc' },
+      include: {
+        lineas: true,
+        envio:  { select: { ciudad: true, estado: true } },
+      },
+    });
+
+    const resultado = ventas.map(v => ({
+      id_venta: v.id_venta,
+      total:    Number(v.total),
+      estado:   v.estado,
+      fecha:    v.fecha,
+      ciudad:   v.envio?.ciudad || null,
+      discos:   v.lineas.map(l => ({
+        discogs_id: l.discogs_id,
+        titulo:     l.titulo,
+        artista:    l.artista,
+        cantidad:   l.cantidad,
+        precio:     Number(l.p_unitario),
+        subtotal:   Number(l.subtotal),
+      })),
+    }));
+
+    res.json(resultado);
+  } catch (err) {
+    console.error('GET /mis-compras:', err.message);
+    res.status(500).json({ error: 'Error al obtener el historial de compras.' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  DIAGNÓSTICO — /redis-ping
+// ══════════════════════════════════════════════════════════
+
+// GET /redis-ping — verifica Redis y muestra claves en caché (solo admin)
+app.get('/redis-ping', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const pong = await redis.ping();
+    const keys = await redis.keys('*');
+    res.json({
+      estado:        pong === 'PONG' ? 'conectado' : 'error',
+      keys_en_cache: keys.length,
+      keys:          keys.sort(),
+    });
+  } catch (err) {
+    res.status(500).json({ estado: 'error', mensaje: err.message });
+  }
+});
+
 // ══════════════════════════════════════════════════════════
 //  ADMIN — /admin/usuarios  /admin/ventas
 // ══════════════════════════════════════════════════════════
