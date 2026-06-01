@@ -334,17 +334,23 @@ app.get('/recientes', async (req, res) => {
 });
 
 
-// GET /genero/:genero
+// GET /genero/:genero?pagina=1
 app.get('/genero/:genero', async (req, res) => {
-  const { genero } = req.params;
-  const clave = `genero:${genero.toLowerCase()}`;
+  const { genero }   = req.params;
+  const pagina       = parseInt(req.query.pagina) || 1;
+  const clave        = `genero:${genero.toLowerCase()}:${pagina}`;
 
   try {
     const resultado = await cachear(clave, TTL.GENERO, async () => {
-      const url  = `https://api.discogs.com/database/search?genre=${encodeURIComponent(genero)}&type=release&sort=have&sort_order=desc&per_page=20&page=1`;
+      const url  = `https://api.discogs.com/database/search?genre=${encodeURIComponent(genero)}&type=release&sort=have&sort_order=desc&per_page=20&page=${pagina}`;
       const resp = await fetch(url, { headers: DISCOGS_HEADERS });
       const data = await resp.json();
-      return (data.results || []).map(formatearResultadoDiscogs);
+      return {
+        resultados: (data.results || []).map(formatearResultadoDiscogs),
+        total:      data.pagination?.items || 0,
+        paginas:    data.pagination?.pages || 1,
+        pagina,
+      };
     });
 
     res.json(resultado);
