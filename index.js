@@ -103,8 +103,15 @@ function verificarToken(req, res, next) {
 }
 
 function soloAdmin(req, res, next) {
-  if (req.usuario?.rol !== 'admin')
+  if (req.usuario?.rol !== 'admin' && req.usuario?.rol !== 'demo')
     return res.status(403).json({ error: 'Acceso denegado: se requieren permisos de administrador.' });
+  next();
+}
+
+// Bloquea acciones de escritura para usuarios demo
+function soloAdminEscritura(req, res, next) {
+  if (req.usuario?.rol === 'demo')
+    return res.status(403).json({ error: 'Tu cuenta es de solo lectura. No puedes realizar esta acción.' });
   next();
 }
 
@@ -272,6 +279,7 @@ app.post('/login', limitarAuth, async (req, res) => {
       token,
       nombre:   usuario.nombre,
       es_admin: usuario.rol === 'admin',
+      es_demo:  usuario.rol === 'demo',
     });
   } catch (err) {
     console.error('LOGIN:', err.message);
@@ -848,7 +856,7 @@ app.get('/admin/usuarios', verificarToken, soloAdmin, async (req, res) => {
 });
 
 // PUT /admin/usuarios/:id/rol — cambiar rol de un usuario
-app.put('/admin/usuarios/:id/rol', verificarToken, soloAdmin, async (req, res) => {
+app.put('/admin/usuarios/:id/rol', verificarToken, soloAdmin, soloAdminEscritura, async (req, res) => {
   const id  = parseInt(req.params.id);
   const { rol } = req.body;
 
@@ -868,7 +876,7 @@ app.put('/admin/usuarios/:id/rol', verificarToken, soloAdmin, async (req, res) =
 });
 
 // DELETE /admin/usuarios/:id — eliminar un usuario
-app.delete('/admin/usuarios/:id', verificarToken, soloAdmin, async (req, res) => {
+app.delete('/admin/usuarios/:id', verificarToken, soloAdmin, soloAdminEscritura, async (req, res) => {
   const id = parseInt(req.params.id);
 
   if (id === req.usuario.id)
@@ -922,7 +930,7 @@ app.get('/admin/ventas/:id', verificarToken, soloAdmin, async (req, res) => {
 });
 
 // PUT /admin/ventas/:id/estado — cambiar estado de una venta
-app.put('/admin/ventas/:id/estado', verificarToken, soloAdmin, async (req, res) => {
+app.put('/admin/ventas/:id/estado', verificarToken, soloAdmin, soloAdminEscritura, async (req, res) => {
   const id = parseInt(req.params.id);
   const { estado } = req.body;
 
