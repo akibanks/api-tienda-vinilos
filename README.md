@@ -309,7 +309,11 @@ Si Redis no está disponible, el backend sigue funcionando pero consulta las API
 | 409 | Conflicto — por ejemplo, nombre de usuario ya registrado |
 | 429 | Rate limit alcanzado |
 | 500 | Error interno del servidor |
-
+---
+<details>
+  <summary>Modelo relacional</summary>
+  <img src="https://github.com/user-attachments/assets/eb826ead-d502-454b-b3a0-a50bd8880af8" alt="Modelo relacional VinylVibes" style="max-width:100%;">
+</details>
 ---
 
 ## Contribuir
