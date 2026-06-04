@@ -27,6 +27,7 @@ const redis  = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 redis.on('error', (err) => console.warn('Redis error:', err.message));
 
 const JWT_SECRET      = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error('JWT_SECRET no está definido en las variables de entorno.');
 const JWT_EXPIRY      = '7d';
 const DISCOGS_TOKEN   = process.env.DISCOGS_TOKEN;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
@@ -103,8 +104,9 @@ function verificarToken(req, res, next) {
 }
 
 function soloAdmin(req, res, next) {
-  if (req.usuario?.rol !== 'admin' && req.usuario?.rol !== 'demo')
+  if (req.usuario?.rol !== 'admin' && req.usuario?.rol !== 'demo') {
     return res.status(403).json({ error: 'Acceso denegado: se requieren permisos de administrador.' });
+  }
   next();
 }
 
@@ -262,12 +264,14 @@ app.post('/login', limitarAuth, async (req, res) => {
       where: { nombre: nombre_usuario.trim() },
     });
 
-    if (!usuario)
-      return res.status(401).json({ error: 'Usuario no encontrado.' });
+    if (!usuario) {
+      await bcrypt.compare(password, '$2b$10$invalidhashfortimingnpurposes000000000000000000000000000');
+      return res.status(401).json({ error: 'Credenciales inválidas.' });
+    }
 
     const esCorrecta = await bcrypt.compare(password, usuario.contrasena);
     if (!esCorrecta)
-      return res.status(401).json({ error: 'Contraseña incorrecta.' });
+      return res.status(401).json({ error: 'Credenciales inválidas.' });
 
     const token = jwt.sign(
       { id: usuario.id_usuario, nombre: usuario.nombre, rol: usuario.rol },
@@ -669,16 +673,43 @@ app.post('/historial', verificarToken, async (req, res) => {
     return res.status(400).json({ error: 'discogs_id, titulo y artista son requeridos.' });
 
   try {
-    await prisma.historial_usuario.create({
-      data: {
-        id_usuario,
-        discogs_id: String(discogs_id),
-        titulo,
-        artista,
-        genero: genero || null,
-        estilo: estilo || null,
-      },
+    // Upsert: si ya existe el disco en el historial del usuario, solo actualiza visto_en
+    const existe = await prisma.historial_usuario.findFirst({
+      where: { id_usuario, discogs_id: String(discogs_id) },
     });
+
+    if (existe) {
+      await prisma.historial_usuario.update({
+        where: { id: existe.id },
+        data:  { visto_en: new Date(), genero: genero || null, estilo: estilo || null },
+      });
+    } else {
+      // Verificar límite de 10 discos por usuario
+      const total = await prisma.historial_usuario.count({ where: { id_usuario } });
+
+      if (total >= 10) {
+        // Eliminar el más antiguo para hacer espacio
+        const masAntiguo = await prisma.historial_usuario.findFirst({
+          where:   { id_usuario },
+          orderBy: { visto_en: 'asc' },
+        });
+        if (masAntiguo) {
+          await prisma.historial_usuario.delete({ where: { id: masAntiguo.id } });
+        }
+      }
+
+      await prisma.historial_usuario.create({
+        data: {
+          id_usuario,
+          discogs_id: String(discogs_id),
+          titulo,
+          artista,
+          genero: genero || null,
+          estilo: estilo || null,
+        },
+      });
+    }
+
     res.status(201).json({ mensaje: 'Historial actualizado.' });
   } catch (err) {
     console.error('POST /historial:', err.message);
@@ -717,8 +748,6 @@ app.post('/checkout', verificarToken, async (req, res) => {
       return res.status(400).json({ error: 'Cada ítem debe tener discogs_id, titulo y artista.' });
     if (!Number.isInteger(item.cantidad) || item.cantidad < 1)
       return res.status(400).json({ error: 'La cantidad debe ser un entero positivo.' });
-    if (typeof item.precio !== 'number' || item.precio < 0)
-      return res.status(400).json({ error: 'El precio debe ser un número positivo.' });
   }
 
   if (!envio?.nombre_receptor || !envio?.calle || !envio?.numero_ext ||
@@ -726,7 +755,20 @@ app.post('/checkout', verificarToken, async (req, res) => {
     return res.status(400).json({ error: 'Los datos de envío son requeridos.' });
 
   try {
-    const total = items.reduce((sum, item) => sum + item.precio * item.cantidad, 0);
+    // Calcular precios en el backend — ignoramos el precio que manda el cliente
+    const itemsConPrecio = await Promise.all(items.map(async (item) => {
+      const stats = await obtenerStats(String(item.discogs_id));
+      // Intentar obtener el año del caché del disco
+      let anio = null;
+      try {
+        const cached = await redis.get(`disco:${item.discogs_id}`);
+        if (cached) anio = JSON.parse(cached).anio || null;
+      } catch {}
+      const precio = calcularPrecio(anio, stats.have, stats.want);
+      return { ...item, precio };
+    }));
+
+    const total = itemsConPrecio.reduce((sum, item) => sum + item.precio * item.cantidad, 0);
 
     const venta = await prisma.venta.create({
       data: {
@@ -734,7 +776,7 @@ app.post('/checkout', verificarToken, async (req, res) => {
         total,
         estado: 'pagada',
         lineas: {
-          create: items.map(item => ({
+          create: itemsConPrecio.map(item => ({
             discogs_id: String(item.discogs_id),
             titulo:     item.titulo,
             artista:    item.artista,
@@ -820,7 +862,16 @@ app.get('/mis-compras', verificarToken, async (req, res) => {
 app.get('/redis-ping', verificarToken, soloAdmin, async (req, res) => {
   try {
     const pong = await redis.ping();
-    const keys = await redis.keys('*');
+
+    // Usar SCAN en lugar de KEYS para no bloquear Redis en producción
+    let cursor = '0';
+    const keys = [];
+    do {
+      const [nextCursor, batch] = await redis.scan(cursor, 'COUNT', 100);
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== '0');
+
     res.json({
       estado:        pong === 'PONG' ? 'conectado' : 'error',
       keys_en_cache: keys.length,
