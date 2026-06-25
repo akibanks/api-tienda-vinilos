@@ -323,7 +323,7 @@ Si Redis no está disponible, el backend sigue funcionando pero consulta las API
 
 
 <details>
-  <summary>Modelo relacional</summary>
+  <summary>Evaluación Google Lighthouse</summary>
   <img src="https://github.com/user-attachments/assets/6c680c6c-c047-4d4a-9ad0-8295bfbe4e2a" style="max-width:100%;">
     </details>
 
