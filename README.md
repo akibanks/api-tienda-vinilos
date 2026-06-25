@@ -320,6 +320,14 @@ Si Redis no está disponible, el backend sigue funcionando pero consulta las API
 <img src="https://github.com/user-attachments/assets/6001af04-200a-42d1-8141-66d65fd12971" alt="Modelo Entidad Relacion Extendido VinylVibes" style="max-width:100%;">
     </details>
 
+
+
+<details>
+  <summary>Modelo relacional</summary>
+  <img src="https://github.com/user-attachments/assets/6c680c6c-c047-4d4a-9ad0-8295bfbe4e2a" style="max-width:100%;">
+    </details>
+
+
 ---
 
 ## Contribuir
